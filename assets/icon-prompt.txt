@@ -1,0 +1,9 @@
+Generated with the built-in image_gen tool. The PNG is the source artwork;
+app-icon.icns contains the macOS icon sizes from 16px through 1024px.
+
+Use case: logo-brand
+Asset type: production macOS application icon, square 1024x1024 raster artwork.
+Primary request: Create an original icon for an independent desktop package manager GUI. A single sculpted package cube with a bold command prompt chevron and small underscore inset on its front face. Elegant, memorable geometric silhouette that remains clear at 32px.
+Style/medium: polished native macOS icon, restrained dimensional illustration, crisp large shapes, subtle material depth and studio highlights. Deep midnight navy rounded-square tile, luminous turquoise/teal package with a small cool ivory command glyph. Center the tile with standard macOS icon margins, leaving truly transparent canvas outside its rounded corners. The package itself should be simple and substantial, viewed slightly from above, without tiny decorative details.
+Text: no words or letters, only the chevron and underscore glyph.
+Constraints: must be an original design, visually distinct from Homebrew branding. No beer, mugs, glasses, foam, barley, hops, bottles, amber or gold palette, Homebrew logos, Apple logos, third-party marks, watermark, mockup, labels or multiple alternatives. One finished icon only.

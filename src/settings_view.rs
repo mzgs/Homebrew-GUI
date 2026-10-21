@@ -349,6 +349,7 @@ mod tests {
     #[gpui_kit::test]
     async fn settings_dialog_validates_saves_cancels_and_reports_errors(cx: &mut TestAppContext) {
         for path in [
+            "icons/app.png",
             "icons/upload.svg",
             "icons/download.svg",
             "icons/settings.svg",

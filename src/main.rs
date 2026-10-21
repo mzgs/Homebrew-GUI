@@ -14,7 +14,6 @@ gpui_kit::assets::icon_assets!(
     [
         Upload,
         Download,
-        Beer,
         Search,
         AppWindow,
         Terminal,
@@ -42,6 +41,11 @@ fn configure_button_feedback(cx: &mut App) {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "icons/app.png" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../assets/app-icon.png"
+            ))));
+        }
         if let Some(bytes) = SettingsIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -51,6 +55,9 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(SettingsIcons.list(path)?);
+        if "icons/app.png".starts_with(path) {
+            paths.push("icons/app.png".into());
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)
