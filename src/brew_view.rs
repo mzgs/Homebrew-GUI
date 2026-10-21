@@ -8,15 +8,23 @@ use gpui_kit::{
         input::{Input, InputEvent, InputState},
         tag::Tag,
     },
-    prelude::FluentBuilder,
     *,
 };
 use std::{path::PathBuf, time::Duration};
 
+#[derive(PartialEq, Eq)]
+enum PackageListRow {
+    Heading(&'static str, &'static str, usize),
+    Installed(usize),
+    Available(usize),
+    Message(String, bool),
+}
+
 pub(crate) struct BrewView {
     brew: Option<PathBuf>,
     query: Entity<InputState>,
-    list_scroll: ScrollHandle,
+    list_scroll: ListState,
+    list_rows: Vec<PackageListRow>,
     installed: Vec<Package>,
     search_results: Vec<Package>,
     search_task: Option<Task<()>>,
@@ -44,7 +52,9 @@ impl BrewView {
         let mut view = Self {
             brew,
             query,
-            list_scroll: ScrollHandle::new(),
+            // Measure beyond the viewport so wheel scrolling has content to advance into.
+            list_scroll: ListState::new(0, ListAlignment::Top, px(500.)),
+            list_rows: Vec::new(),
             installed: Vec::new(),
             search_results: Vec::new(),
             search_task: None,
@@ -437,80 +447,92 @@ impl Render for BrewView {
             .enumerate()
             .filter(|(_, p)| !p.installed)
             .collect();
-        let mut list =
-            div()
-                .id("package-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.list_scroll)
-                .px_6()
-                .pb_6()
-                .child(self.section_heading("installed-section", "Installed", installed.len(), cx))
-                .children(installed.iter().map(|(index, package)| {
-                    self.package_row("installed-package", *index, package, cx)
-                }))
-                .when(installed.is_empty(), |list| {
-                    list.child(
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if self.busy {
-                                "Reading installed packages…"
-                            } else if self.brew.is_none() {
-                                "Install Homebrew to get started."
-                            } else if filter.is_empty() {
-                                "No installed packages."
-                            } else {
-                                "No installed packages match your search."
-                            }),
-                    )
-                });
-        if !filter.is_empty() {
-            list = list
-                .child(self.section_heading(
-                    "available-section",
-                    "Available packages",
-                    available.len(),
-                    cx,
-                ))
-                .when(self.searching, |list| {
-                    list.child(
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Searching Homebrew…"),
-                    )
-                })
-                .when_some(self.search_error.clone(), |list, error| {
-                    list.child(
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(error),
-                    )
-                })
-                .children(available.into_iter().map(|(index, package)| {
-                    self.package_row("available-package", index, package, cx)
-                }))
-                .when(
-                    !self.searching
-                        && self.search_error.is_none()
-                        && self.search_results.iter().all(|p| p.installed),
-                    |list| {
-                        list.child(
-                            div()
-                                .p_4()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No additional packages found."),
-                        )
-                    },
-                );
+        let mut rows = vec![PackageListRow::Heading(
+            "installed-section",
+            "Installed",
+            installed.len(),
+        )];
+        rows.extend(
+            installed
+                .iter()
+                .map(|(index, _)| PackageListRow::Installed(*index)),
+        );
+        if installed.is_empty() {
+            rows.push(PackageListRow::Message(
+                if self.busy {
+                    "Reading installed packages…"
+                } else if self.brew.is_none() {
+                    "Install Homebrew to get started."
+                } else if filter.is_empty() {
+                    "No installed packages."
+                } else {
+                    "No installed packages match your search."
+                }
+                .into(),
+                false,
+            ));
         }
+        if !filter.is_empty() {
+            rows.push(PackageListRow::Heading(
+                "available-section",
+                "Available packages",
+                available.len(),
+            ));
+            if self.searching {
+                rows.push(PackageListRow::Message("Searching Homebrew…".into(), false));
+            }
+            if let Some(error) = &self.search_error {
+                rows.push(PackageListRow::Message(error.clone(), true));
+            }
+            rows.extend(
+                available
+                    .iter()
+                    .map(|(index, _)| PackageListRow::Available(*index)),
+            );
+            if !self.searching && self.search_error.is_none() && available.is_empty() {
+                rows.push(PackageListRow::Message(
+                    "No additional packages found.".into(),
+                    false,
+                ));
+            }
+        }
+        if rows != self.list_rows {
+            self.list_scroll.reset(rows.len());
+            self.list_rows = rows;
+        }
+        let list = list(
+            self.list_scroll.clone(),
+            cx.processor(|this, index, _, cx| {
+                let row = match &this.list_rows[index] {
+                    PackageListRow::Heading(id, title, count) => this
+                        .section_heading(id, title, *count, cx)
+                        .into_any_element(),
+                    PackageListRow::Installed(index) => {
+                        this.package_row("installed-package", *index, &this.installed[*index], cx)
+                    }
+                    PackageListRow::Available(index) => this.package_row(
+                        "available-package",
+                        *index,
+                        &this.search_results[*index],
+                        cx,
+                    ),
+                    PackageListRow::Message(message, failed) => div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(if *failed {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(message.clone())
+                        .into_any_element(),
+                };
+                div().px_6().child(row).into_any_element()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .pb_6();
         div()
             .size_full()
             .flex()
@@ -624,7 +646,7 @@ impl Render for BrewView {
                     .child(
                         div()
                             .id("brew-output")
-                            .h(px(65.))
+                            .h(px(100.))
                             .overflow_y_scroll()
                             .rounded_md()
                             .bg(cx.theme().muted)
@@ -652,6 +674,83 @@ mod tests {
         test::{TestAppContextExt, TestWindowExt},
     };
     use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    #[gpui_kit::test]
+    fn package_list_virtualizes_and_filters_large_inventories(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let handle = cx.open_window(size(px(1000.), px(720.)), |window, cx| {
+            let entity = cx.new(|cx| {
+                let mut view = BrewView::new(None, window, cx);
+                view.installed = (0..1000)
+                    .map(|index| crate::brew::Package {
+                        name: format!("package-{index:04}"),
+                        kind: crate::brew::Kind::Formula,
+                        description: "Test package".into(),
+                        version: "1.0".into(),
+                        installed: true,
+                        next_version: None,
+                        pinned: false,
+                    })
+                    .collect();
+                view
+            });
+            view = Some(entity.clone());
+            Root::new(entity, window, cx)
+        });
+        let view = view.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("installed-package", 0usize)).is_some());
+            assert!(window.try_find(("installed-package", 999usize)).is_none());
+            window.scroll(
+                ("installed-package", 0usize),
+                gpui_kit::ScrollDelta::Lines(gpui_kit::point(0., -10.)),
+                cx,
+            );
+            assert!(
+                view.read(cx).list_scroll.logical_scroll_top().item_ix > 0,
+                "Wheel input must advance the virtual list"
+            );
+            for _ in 0..12 {
+                let index = view.read(cx).list_scroll.logical_scroll_top().item_ix;
+                window.scroll(
+                    ("installed-package", index),
+                    gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-200.))),
+                    cx,
+                );
+            }
+            let scrolled = view.read(cx).list_scroll.logical_scroll_top().item_ix;
+            assert!(
+                scrolled > 20,
+                "Trackpad scrolling must keep advancing beyond the buffer"
+            );
+            window.scroll(
+                ("installed-package", scrolled),
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(200.))),
+                cx,
+            );
+            assert!(
+                view.read(cx).list_scroll.logical_scroll_top().item_ix < scrolled,
+                "Trackpad scrolling must also work upward"
+            );
+            view.read(cx).list_scroll.scroll_to(gpui_kit::ListOffset {
+                item_ix: 1000,
+                offset_in_item: px(0.),
+            });
+            window.refresh();
+            window.render_frame(cx);
+            assert!(window.try_find(("installed-package", 0usize)).is_none());
+            assert!(window.try_find(("installed-package", 999usize)).is_some());
+            window.click("package-search", cx);
+            window.input("package-0999", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("installed-section").is_some());
+            assert!(window.try_find(("installed-package", 999usize)).is_some());
+            assert!(window.try_find(("installed-package", 998usize)).is_none());
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     async fn combined_search_updates_and_refresh_preserve_installed_packages(
