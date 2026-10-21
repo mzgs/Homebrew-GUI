@@ -363,7 +363,7 @@ impl BrewView {
                     .ghost()
                     .small()
                     .icon(IconName::Trash)
-                    .label("Uninstall…")
+                    .accessibility_label("Uninstall…")
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_removal(package.clone(), window, cx)
