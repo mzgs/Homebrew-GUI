@@ -5,10 +5,14 @@ edition = "2024"
 publish = false
 
 [dependencies]
+async-channel = "2"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "dc00da1837f16a6da42280535d76a2d7acc4a40e", features = ["gpui-fast"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "3"
 
 [dev-dependencies]
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "dc00da1837f16a6da42280535d76a2d7acc4a40e", features = ["test-support"] }

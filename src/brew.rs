@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::{
+    io::{Read, pipe},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -75,13 +76,14 @@ pub(crate) fn find_brew() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn run(brew: &Path, args: &[&str]) -> Result<Output, String> {
+fn command(brew: &Path, args: &[&str]) -> Result<Command, String> {
     let mut paths = vec![brew.parent().unwrap_or(Path::new("/usr/bin")).to_path_buf()];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     paths.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from));
-    Command::new(brew)
+    let mut command = Command::new(brew);
+    command
         .args(args)
         .env(
             "PATH",
@@ -91,9 +93,79 @@ fn run(brew: &Path, args: &[&str]) -> Result<Output, String> {
         .env("HOMEBREW_NO_EMOJI", "1")
         .env("TERM", "dumb")
         .env("HOMEBREW_NO_ASK", "1")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    Ok(command)
+}
+
+fn run(brew: &Path, args: &[&str]) -> Result<Output, String> {
+    command(brew, args)?
         .output()
         .map_err(|e| format!("Couldn’t run {}: {e}", brew.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn askpass() -> Result<tempfile::TempPath, String> {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let mut helper = tempfile::NamedTempFile::new()
+        .map_err(|e| format!("Couldn’t create the administrator password helper: {e}"))?;
+    helper
+        .write_all(include_bytes!("askpass.applescript"))
+        .map_err(|e| format!("Couldn’t write the administrator password helper: {e}"))?;
+    helper
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("Couldn’t secure the administrator password helper: {e}"))?;
+    Ok(helper.into_temp_path())
+}
+
+fn run_streamed(
+    brew: &Path,
+    args: &[&str],
+    mut on_output: impl FnMut(&str),
+) -> Result<Output, String> {
+    let (mut reader, writer) =
+        pipe().map_err(|e| format!("Couldn’t capture Homebrew output: {e}"))?;
+    let stderr = writer.try_clone().map_err(|e| e.to_string())?;
+    let mut command = command(brew, args)?;
+    #[cfg(target_os = "macos")]
+    let _askpass = if std::env::var_os("SUDO_ASKPASS").is_none() {
+        let helper = askpass()?;
+        command.env("SUDO_ASKPASS", &helper);
+        Some(helper)
+    } else {
+        None
+    };
+    let mut child = command
+        .stdout(writer)
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| format!("Couldn’t run {}: {e}", brew.display()))?;
+    drop(command);
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                output.extend_from_slice(&buffer[..count]);
+                // shortcut: full snapshots preserve split UTF-8; decode incrementally for very large logs.
+                on_output(&String::from_utf8_lossy(&output));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Couldn’t read Homebrew output: {error}"));
+            }
+        }
+    }
+    Ok(Output {
+        status: child
+            .wait()
+            .map_err(|e| format!("Couldn’t wait for Homebrew: {e}"))?,
+        stdout: output,
+        stderr: Vec::new(),
+    })
 }
 
 fn output_text(output: &Output) -> String {
@@ -214,8 +286,8 @@ pub(crate) fn installed(brew: &Path) -> Result<Vec<Package>, String> {
     parse_inventory(&output.stdout)
 }
 
-pub(crate) fn update_catalog(brew: &Path) -> Result<(), String> {
-    let output = run(brew, &["update"])?;
+pub(crate) fn update_catalog(brew: &Path, on_output: impl FnMut(&str)) -> Result<(), String> {
+    let output = run_streamed(brew, &["update"], on_output)?;
     if !output.status.success() {
         return Err(failure(&output));
     }
@@ -283,11 +355,12 @@ pub(crate) fn execute(
     brew: &Path,
     operation: Operation,
     package: &Package,
+    on_output: impl FnMut(&str),
 ) -> Result<String, String> {
     if !valid_name(&package.name) {
         return Err("Invalid package name.".into());
     }
-    let output = run(
+    let output = run_streamed(
         brew,
         &[
             operation.command(),
@@ -295,6 +368,7 @@ pub(crate) fn execute(
             "--",
             &package.name,
         ],
+        on_output,
     )?;
     if !output.status.success() {
         return Err(failure(&output));
@@ -310,6 +384,32 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn administrator_helper_is_private_compiles_and_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let helper = askpass().unwrap();
+        let path = helper.to_path_buf();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let compiled = tempfile::NamedTempFile::new().unwrap();
+        let output = Command::new("/usr/bin/osacompile")
+            .arg("-o")
+            .arg(compiled.path())
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        drop(helper);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn reads_formulae_and_casks_without_confusing_versions_or_names() {
@@ -332,6 +432,43 @@ mod tests {
         for name in ["wget", "python@3.14", "user/tap/c++", "visual-studio-code"] {
             assert!(valid_name(name), "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streams_both_outputs_before_exit_without_waiting_for_a_newline() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("homebrew-gui-stream-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let script = directory.join("brew");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+printf 'stdout: café '
+printf 'stderr: live' >&2
+attempt=0
+while [ ! -f "$0.observed" ] && [ "$attempt" -lt 200 ]; do
+  sleep 0.01
+  attempt=$((attempt + 1))
+done
+if [ ! -f "$0.observed" ]; then exit 8; fi
+printf '\nfinished\n'
+exit 9
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = run_streamed(&script, &[], |text| {
+            if text.contains("stdout: café stderr: live") {
+                std::fs::write(script.with_extension("observed"), "").unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(output.status.code(), Some(9));
+        let error = failure(&output);
+        assert!(error.contains("stdout: café stderr: live\nfinished"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
@@ -361,10 +498,10 @@ esac
         let results = search(&script, "wget", &[]).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
-            execute(&script, Operation::Install, &results[0]).unwrap(),
+            execute(&script, Operation::Install, &results[0], |_| {}).unwrap(),
             "install\n--formula\n--\nwget"
         );
-        let error = execute(&script, Operation::Upgrade, &results[0]).unwrap_err();
+        let error = execute(&script, Operation::Upgrade, &results[0], |_| {}).unwrap_err();
         assert!(error.contains('9') && error.contains("Network unavailable"));
         assert!(search(&script, "--help", &[]).is_err());
         std::fs::remove_dir_all(directory).unwrap();

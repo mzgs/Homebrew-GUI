@@ -35,6 +35,7 @@ pub(crate) struct BrewView {
     pub(crate) busy: bool,
     status: String,
     output: String,
+    output_scroll: ScrollHandle,
     failed: bool,
 }
 
@@ -75,6 +76,7 @@ impl BrewView {
                 "Homebrew output will appear here.".into()
             },
             failed: missing,
+            output_scroll: ScrollHandle::new(),
         };
         if !missing {
             view.refresh(false, cx);
@@ -110,15 +112,29 @@ impl BrewView {
             "Reading installed packages…"
         }
         .into();
+        let (sender, output_task) = self.stream_output(
+            if fetch_catalog {
+                "$ brew update\n\n"
+            } else {
+                "Reading installed packages…\n"
+            }
+            .into(),
+            cx,
+        );
         let task = cx.background_spawn(async move {
             let update_error = if fetch_catalog {
-                brew::update_catalog(&brew).err()
+                brew::update_catalog(&brew, |output| {
+                    let _ = sender.force_send(output.into());
+                })
+                .err()
             } else {
                 None
             };
+            drop(sender);
             (brew::installed(&brew), update_error)
         });
         cx.spawn(async move |this, cx| {
+            output_task.await;
             let (result, update_error) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
@@ -126,7 +142,7 @@ impl BrewView {
                     Ok(packages) => {
                         this.set_installed(packages);
                         this.status = this.summary();
-                        this.output = "Package versions checked. Use Refresh to fetch the latest Homebrew metadata.".into();
+                        this.output.push_str("\nPackage versions checked. Use Refresh to fetch the latest Homebrew metadata.");
                         if let Some(error) = update_error {
                             this.status = "Couldn’t check for updates — showing cached versions".into();
                             this.output = error;
@@ -135,6 +151,7 @@ impl BrewView {
                     }
                     Err(error) => { this.status = "Couldn’t load packages".into(); this.output = error; this.failed = true; }
                 }
+                this.output_scroll.scroll_to_bottom();
                 if !this.query.read(cx).value().trim().is_empty() { this.search(Duration::ZERO, cx); }
                 cx.notify();
             });
@@ -209,17 +226,24 @@ impl BrewView {
         self.busy = true;
         self.failed = false;
         self.status = format!("Running brew {} {}…", operation.command(), package.name);
-        self.output = format!(
-            "$ brew {} {} -- {}\n\nWorking… This can take a few minutes. Output appears when the command finishes.",
-            operation.command(),
-            package.kind.flag(),
-            package.name
+        let (sender, output_task) = self.stream_output(
+            format!(
+                "$ brew {} {} -- {}\n\n",
+                operation.command(),
+                package.kind.flag(),
+                package.name
+            ),
+            cx,
         );
         let task = cx.background_spawn(async move {
-            let result = brew::execute(&brew, operation, &package);
+            let result = brew::execute(&brew, operation, &package, |output| {
+                let _ = sender.force_send(output.into());
+            });
+            drop(sender);
             (result, brew::installed(&brew))
         });
         cx.spawn(async move |this, cx| {
+            output_task.await;
             let (result, installed) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
@@ -243,11 +267,37 @@ impl BrewView {
                         this.failed = true;
                     }
                 }
+                this.output_scroll.scroll_to_bottom();
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn stream_output(
+        &mut self,
+        header: String,
+        cx: &mut Context<Self>,
+    ) -> (async_channel::Sender<String>, Task<()>) {
+        self.output = header.clone();
+        self.output_scroll.scroll_to_bottom();
+        let (sender, receiver) = async_channel::bounded::<String>(1);
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(output) = receiver.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.output = format!("{header}{output}");
+                        this.output_scroll.scroll_to_bottom();
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (sender, task)
     }
 
     fn confirm_removal(&mut self, package: Package, window: &mut Window, cx: &mut Context<Self>) {
@@ -640,8 +690,10 @@ impl Render for BrewView {
                     .child(
                         div()
                             .id("brew-output")
-                            .h(px(100.))
+                            .test_support()
+                            .h(px(140.))
                             .overflow_y_scroll()
+                            .track_scroll(&self.output_scroll)
                             .rounded_md()
                             .bg(cx.theme().muted)
                             .p_3()
@@ -668,6 +720,46 @@ mod tests {
         test::{TestAppContextExt, TestWindowExt},
     };
     use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    #[gpui_kit::test]
+    fn activity_stream_updates_while_busy(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let handle = cx.open_window(size(px(1000.), px(720.)), |window, cx| {
+            let entity = cx.new(|cx| BrewView::new(None, window, cx));
+            view = Some(entity.clone());
+            Root::new(entity, window, cx)
+        });
+        let view = view.unwrap();
+        let (sender, _task) = view.update(cx, |view, cx| {
+            view.busy = true;
+            view.stream_output("$ brew install wget\n\n".into(), cx)
+        });
+        sender.force_send("Downloading…\n".repeat(40)).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let view = view.read(cx);
+            assert!(view.busy);
+            assert!(view.output.contains("Downloading…"));
+            assert!(view.output_scroll.max_offset().y > px(0.));
+            assert_eq!(
+                view.output_scroll.offset().y,
+                -view.output_scroll.max_offset().y
+            );
+        })
+        .unwrap();
+        sender
+            .force_send("Downloading…\nInstalling café…".into())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(view.read(cx).busy);
+            assert!(view.read(cx).output.ends_with("Installing café…"));
+        });
+        drop(sender);
+        cx.run_until_parked();
+    }
 
     #[gpui_kit::test]
     fn package_list_virtualizes_and_filters_large_inventories(cx: &mut TestAppContext) {
@@ -774,7 +866,10 @@ case "$1" in
   upgrade)
     if [ "$4" != wget ]; then echo 'Unexpected update target' >&2; exit 8; fi
     if [ "$HOMEBREW_NO_ASK" != 1 ]; then echo 'Missing noninteractive confirmation' >&2; exit 8; fi
-    touch "$0.upgraded"; echo 'Updated wget';;
+    touch "$0.upgraded"
+    line=0
+    while [ "$line" -lt 40 ]; do echo 'Updating wget'; line=$((line + 1)); done
+    echo 'Updated wget';;
 esac
 "##).unwrap();
         std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -854,6 +949,26 @@ esac
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(view.read(cx).installed[0].version, "1.1");
+            let scroll = view.read(cx).output_scroll.clone();
+            assert!(scroll.max_offset().y > px(0.));
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            window.scroll(
+                "brew-output",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(40.))),
+                cx,
+            );
+            let offset = scroll.offset().y;
+            assert!(
+                offset > -scroll.max_offset().y,
+                "Older output stays scrollable"
+            );
+            window.refresh();
+            window.render_frame(cx);
+            assert_eq!(
+                scroll.offset().y,
+                offset,
+                "Redraws preserve manual scrolling"
+            );
             assert!(window.try_find(("update-package", 0usize)).is_none());
             window.click(("uninstall-package", 0usize), cx);
             window.render_frame(cx);
