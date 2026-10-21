@@ -1,13 +1,21 @@
+mod brew;
+mod brew_view;
 mod settings;
 mod settings_view;
 mod window_state;
 
-use gpui_kit::component::{ActiveTheme, Theme};
+use gpui_kit::component::{ActiveTheme, Theme, WindowExt};
 use gpui_kit::*;
 use settings::Settings;
 use window_state::WindowState;
 
-gpui_kit::assets::icon_assets!(SettingsIcons, [Upload, Download]);
+gpui_kit::assets::icon_assets!(
+    SettingsIcons,
+    [
+        Upload, Download, Beer, Search, AppWindow, Terminal, ArrowUp, ArrowRight, Trash, RefreshCw,
+        Activity
+    ]
+);
 
 struct Assets;
 
@@ -33,6 +41,7 @@ impl Global for Settings {}
 actions!(base_app, [Quit, OpenSettings]);
 
 struct AppView {
+    brew: Entity<brew_view::BrewView>,
     window_path: Option<std::path::PathBuf>,
     window_state: WindowState,
 }
@@ -41,6 +50,7 @@ impl AppView {
     fn new(
         window_path: Option<std::path::PathBuf>,
         restored: Option<WindowState>,
+        brew_path: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -55,16 +65,33 @@ impl AppView {
         .detach();
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            let _ = weak.update(cx, |view, _| {
+            weak.update(cx, |view, cx| {
+                if !view.can_close(window, cx) {
+                    return false;
+                }
                 view.window_state.update(window);
                 view.save_window_state();
-            });
-            true
+                true
+            })
+            .unwrap_or(true)
         });
         Self {
+            brew: cx.new(|cx| brew_view::BrewView::new(brew_path, window, cx)),
             window_path,
             window_state,
         }
+    }
+
+    fn can_close(&self, window: &mut Window, cx: &mut App) -> bool {
+        if self.brew.read(cx).busy {
+            window.open_alert_dialog(cx, |dialog, _, _| {
+                dialog
+                    .title("Homebrew is still working")
+                    .description("Wait for the current command to finish before closing the app.")
+            });
+            return false;
+        }
+        true
     }
 
     fn save_window_state(&self) {
@@ -81,7 +108,10 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(cx.theme().background)
+        div()
+            .size_full()
+            .bg(cx.theme().background)
+            .child(self.brew.clone())
     }
 }
 
@@ -142,19 +172,20 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowState::window_bounds(restored.as_ref(), cx)),
             titlebar: Some(TitlebarOptions {
-                title: Some(env!("CARGO_PKG_NAME").into()),
+                title: Some("Homebrew".into()),
                 ..Default::default()
             }),
+            window_min_size: Some(size(px(900.), px(560.))),
             ..Default::default()
         };
-        let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
+        let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
             window
                 .observe_window_appearance(|window, cx| {
                     Theme::sync_system_appearance(Some(window), cx);
                 })
                 .detach();
-            cx.new(|cx| AppView::new(window_path, restored, window, cx))
+            cx.new(|cx| AppView::new(window_path, restored, brew::find_brew(), window, cx))
         })
         .expect("Failed to open app window");
         window_handle.set(Some(handle));
@@ -166,7 +197,19 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             KeyBinding::new("ctrl-,", OpenSettings, None),
         ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(move |_: &Quit, cx| {
+            let view = view.clone();
+            cx.defer(move |cx| {
+                if cx
+                    .update_window(handle, |_, window, cx| {
+                        view.update(cx, |view, cx| view.can_close(window, cx))
+                    })
+                    .unwrap_or(false)
+                {
+                    cx.quit();
+                }
+            });
+        });
         settings_view::register_action(handle, settings_path, startup_error.clone(), cx);
         cx.set_menus(vec![Menu {
             name: env!("CARGO_PKG_NAME").into(),

@@ -366,7 +366,7 @@ mod tests {
             cx.set_global(Settings::default());
         });
         let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
-            let view = cx.new(|cx| AppView::new(None, None, window, cx));
+            let view = cx.new(|cx| AppView::new(None, None, None, window, cx));
             Root::new(view, window, cx)
         });
         cx.update(|cx| {
