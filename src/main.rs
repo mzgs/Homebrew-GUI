@@ -19,6 +19,15 @@ gpui_kit::assets::icon_assets!(
 
 struct Assets;
 
+fn configure_button_feedback(cx: &mut App) {
+    Theme::update(cx, |theme| {
+        theme.colors.button_primary_hover = Hsla {
+            l: (theme.primary.l + 0.08).min(1.0),
+            ..theme.primary
+        };
+    });
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
         if let Some(bytes) = SettingsIcons.load(path)? {
@@ -180,9 +189,11 @@ fn main() {
         };
         let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
+            configure_button_feedback(cx);
             window
                 .observe_window_appearance(|window, cx| {
                     Theme::sync_system_appearance(Some(window), cx);
+                    configure_button_feedback(cx);
                 })
                 .detach();
             cx.new(|cx| AppView::new(window_path, restored, brew::find_brew(), window, cx))

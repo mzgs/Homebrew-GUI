@@ -9,6 +9,7 @@ use gpui_kit::{
         form::{Field, Form},
         input::{Input, InputState},
     },
+    prelude::FluentBuilder,
     *,
 };
 use std::path::PathBuf;
@@ -287,10 +288,14 @@ impl Render for SettingsForm {
                 DialogFooter::new()
                     .child(
                         Button::new("cancel")
+                            .cursor_pointer()
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
-                    .child(DialogAction::new().child(Button::new("save").primary().label("Save"))),
+                    .child(
+                        DialogAction::new()
+                            .child(Button::new("save").primary().cursor_pointer().label("Save")),
+                    ),
             )
             .child(
                 div()
@@ -305,6 +310,7 @@ impl Render for SettingsForm {
                             .icon(IconName::Upload)
                             .label("Import settings…")
                             .disabled(self.transfer_busy)
+                            .when(!self.transfer_busy, |button| button.cursor_pointer())
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.transfer(true, window, cx)),
                             ),
@@ -315,6 +321,7 @@ impl Render for SettingsForm {
                             .icon(IconName::Download)
                             .label("Export settings…")
                             .disabled(self.transfer_busy)
+                            .when(!self.transfer_busy, |button| button.cursor_pointer())
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.transfer(false, window, cx)),
                             ),

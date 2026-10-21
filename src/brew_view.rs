@@ -8,6 +8,7 @@ use gpui_kit::{
         input::{Input, InputEvent, InputState},
         tag::Tag,
     },
+    prelude::FluentBuilder,
     *,
 };
 use std::{path::PathBuf, time::Duration};
@@ -332,30 +333,14 @@ impl BrewView {
                 .id(("versions", index))
                 .test_support()
                 .role(Role::Status)
-                .aria_label(
-                    package
-                        .next_version
-                        .as_ref()
-                        .map(|next| format!("{} → {next}", package.version))
-                        .unwrap_or_else(|| package.version.clone()),
-                )
+                .aria_label(package.version.clone())
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(Tag::secondary().small().child(package.version.clone()));
-            if let Some(next) = &package.next_version {
-                versions = versions
-                    .child(
-                        Icon::new(IconName::ArrowRight)
-                            .size_3()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(Tag::success().outline().small().child(next.clone()));
-            }
             if package.pinned {
                 versions = versions.child(Tag::secondary().small().child("Pinned"));
             }
-            row = row.child(versions);
             if package.next_version.is_some() {
                 let package = package.clone();
                 row = row.child(
@@ -365,11 +350,15 @@ impl BrewView {
                         .icon(IconName::ArrowUp)
                         .label("Update")
                         .disabled(self.busy || package.pinned)
+                        .when(!self.busy && !package.pinned, |button| {
+                            button.cursor_pointer()
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.operate(Operation::Upgrade, package.clone(), cx)
                         })),
                 );
             }
+            row = row.child(versions);
             let package = package.clone();
             row = row.child(
                 Button::new(("uninstall-package", index))
@@ -378,6 +367,7 @@ impl BrewView {
                     .icon(IconName::Trash)
                     .accessibility_label("Uninstall…")
                     .disabled(self.busy)
+                    .when(!self.busy, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_removal(package.clone(), window, cx)
                     })),
@@ -391,6 +381,7 @@ impl BrewView {
                     .icon(IconName::Download)
                     .label("Install")
                     .disabled(self.busy)
+                    .when(!self.busy, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.operate(Operation::Install, package.clone(), cx)
                     })),
@@ -577,6 +568,9 @@ impl Render for BrewView {
                                     .icon(IconName::RefreshCw)
                                     .label("Refresh")
                                     .disabled(self.busy || self.brew.is_none())
+                                    .when(!self.busy && self.brew.is_some(), |button| {
+                                        button.cursor_pointer()
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx))),
                             ),
                     )
@@ -668,7 +662,7 @@ impl Render for BrewView {
 mod tests {
     use super::BrewView;
     use gpui_kit::{
-        AppContext, TestAppContext,
+        AppContext, InputEvent, TestAppContext,
         component::Root,
         px, size,
         test::{TestAppContextExt, TestWindowExt},
@@ -796,13 +790,56 @@ esac
             !view.read(cx).busy
         })
         .await;
+        cx.update(|cx| {
+            use gpui_kit::component::{Theme, ThemeMode};
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                Theme::change(mode, None, cx);
+                crate::configure_button_feedback(cx);
+                let theme = Theme::global(cx);
+                assert!(theme.button_primary_hover.l > theme.primary.l);
+                assert_eq!(theme.button_primary_hover.h, theme.primary.h);
+                assert_eq!(theme.button_primary_hover.s, theme.primary.s);
+            }
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(view.read(cx).installed.len(), 2);
             assert!(window.try_find("installed-section").is_some());
             assert!(window.try_find("available-section").is_none());
             assert!(window.try_find("installed-tab").is_none());
-            assert_eq!(window.find(("versions", 0usize)).label(), Some("1.0 → 1.1"));
+            assert_eq!(window.find(("versions", 0usize)).label(), Some("1.0"));
+            assert_eq!(
+                window.find(("update-package", 0usize)).label(),
+                Some("Update")
+            );
+            let button_bounds = window
+                .find(("update-package", 0usize))
+                .bounds()
+                .scale(window.scale_factor());
+            let button_background = |window: &gpui_kit::Window| {
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .find(|quad| quad.bounds == button_bounds)
+                    .expect("Update button must paint a background")
+                    .background
+            };
+            let normal = button_background(window);
+            window.dispatch_event(
+                gpui_kit::MouseMoveEvent {
+                    position: window.find(("update-package", 0usize)).bounds().center(),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            assert_ne!(
+                button_background(window),
+                normal,
+                "Hover must change the Update button background"
+            );
             window.click(("update-package", 1usize), cx);
             assert!(!view.read(cx).busy, "Pinned packages must not be updated");
             window.click(("update-package", 0usize), cx);
