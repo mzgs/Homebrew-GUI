@@ -1,6 +1,7 @@
 use crate::brew::{self, Kind, Operation, Package};
 use gpui_kit::{
     assets::IconName,
+    base::{ScrollBounce, ScrollBounceMotion},
     component::{
         ActiveTheme, Disableable, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
@@ -15,6 +16,7 @@ use std::{path::PathBuf, time::Duration};
 pub(crate) struct BrewView {
     brew: Option<PathBuf>,
     query: Entity<InputState>,
+    list_scroll: ScrollHandle,
     installed: Vec<Package>,
     search_results: Vec<Package>,
     search_task: Option<Task<()>>,
@@ -42,6 +44,7 @@ impl BrewView {
         let mut view = Self {
             brew,
             query,
+            list_scroll: ScrollHandle::new(),
             installed: Vec::new(),
             search_results: Vec::new(),
             search_task: None,
@@ -440,6 +443,7 @@ impl Render for BrewView {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .track_scroll(&self.list_scroll)
                 .px_6()
                 .pb_6()
                 .child(self.section_heading("installed-section", "Installed", installed.len(), cx))
@@ -569,7 +573,11 @@ impl Render for BrewView {
                     .flex_col()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(list),
+                    .child(
+                        ScrollBounce::new("package-list-bounce", &self.list_scroll, list)
+                            .enabled(true)
+                            .motion(ScrollBounceMotion::default().with_tracking(0.25)),
+                    ),
             )
             .child(
                 div()
