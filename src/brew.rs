@@ -46,7 +46,10 @@ impl Package {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Operation {
+    Info,
+    Homepage,
     Install,
+    Reinstall,
     Upgrade,
     Uninstall,
 }
@@ -54,7 +57,10 @@ pub(crate) enum Operation {
 impl Operation {
     pub(crate) fn command(self) -> &'static str {
         match self {
+            Self::Info => "info",
+            Self::Homepage => "home",
             Self::Install => "install",
+            Self::Reinstall => "reinstall",
             Self::Upgrade => "upgrade",
             Self::Uninstall => "uninstall",
         }
@@ -487,7 +493,7 @@ case "$1" in
   search)
     if [ "$2" = --formula ]; then printf '%s\n' 'wget' 'wget2';
     else printf '%s\n' 'Error: No formulae or casks found for "wget".' >&2; exit 1; fi;;
-  install) printf '%s\n' "$@";;
+  install|reinstall) printf '%s\n' "$@";;
   upgrade) echo 'Network unavailable' >&2; exit 9;;
 esac
 "##,
@@ -500,6 +506,10 @@ esac
         assert_eq!(
             execute(&script, Operation::Install, &results[0], |_| {}).unwrap(),
             "install\n--formula\n--\nwget"
+        );
+        assert_eq!(
+            execute(&script, Operation::Reinstall, &results[0], |_| {}).unwrap(),
+            "reinstall\n--formula\n--\nwget"
         );
         let error = execute(&script, Operation::Upgrade, &results[0], |_| {}).unwrap_err();
         assert!(error.contains('9') && error.contains("Network unavailable"));

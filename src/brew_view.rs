@@ -5,7 +5,9 @@ use gpui_kit::{
     component::{
         ActiveTheme, Disableable, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
+        dialog::DialogFooter,
         input::{Input, InputEvent, InputState},
+        menu::{DropdownMenu, PopupMenuItem},
         tag::Tag,
     },
     prelude::FluentBuilder,
@@ -222,7 +224,10 @@ impl BrewView {
         let Some(brew) = self.brew.clone() else {
             return;
         };
-        self.cancel_search();
+        let refresh_packages = !matches!(operation, Operation::Info | Operation::Homepage);
+        if refresh_packages {
+            self.cancel_search();
+        }
         self.busy = true;
         self.failed = false;
         self.status = format!("Running brew {} {}…", operation.command(), package.name);
@@ -240,7 +245,7 @@ impl BrewView {
                 let _ = sender.force_send(output.into());
             });
             drop(sender);
-            (result, brew::installed(&brew))
+            (result, refresh_packages.then(|| brew::installed(&brew)))
         });
         cx.spawn(async move |this, cx| {
             output_task.await;
@@ -258,13 +263,17 @@ impl BrewView {
                         this.failed = true;
                     }
                 }
-                match installed {
-                    Ok(packages) => this.set_installed(packages),
-                    Err(error) => {
-                        this.output
-                            .push_str(&format!("\n\nCouldn’t refresh installed packages: {error}"));
-                        this.status = "Package list may be out of date — refresh to retry".into();
-                        this.failed = true;
+                if let Some(installed) = installed {
+                    match installed {
+                        Ok(packages) => this.set_installed(packages),
+                        Err(error) => {
+                            this.output.push_str(&format!(
+                                "\n\nCouldn’t refresh installed packages: {error}"
+                            ));
+                            this.status =
+                                "Package list may be out of date — refresh to retry".into();
+                            this.failed = true;
+                        }
                     }
                 }
                 this.output_scroll.scroll_to_bottom();
@@ -312,6 +321,42 @@ impl BrewView {
                     view.update(cx, |this, cx| this.operate(Operation::Uninstall, package.clone(), cx));
                     true
                 })
+        });
+    }
+
+    fn other_versions(&mut self, package: &Package, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let name = package.name.split('@').next().unwrap_or(&package.name);
+        self.query.update(cx, |query, cx| {
+            query.set_value(format!("{name}@"), window, cx);
+            query.focus(window, cx);
+        });
+        self.search(Duration::ZERO, cx);
+    }
+
+    fn show_details(&self, package: Package, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(brew) = self.brew.clone() else {
+            return;
+        };
+        let title = format!("Package details — {}", package.name);
+        let details = cx.new(|cx| PackageDetails::new(brew, package, cx));
+        window.open_dialog(cx, move |dialog, window, _| {
+            dialog
+                .title(title.clone())
+                .width(window.rem_size() * 44.)
+                .child(details.clone())
+                .footer(
+                    DialogFooter::new().child(
+                        Button::new("close-package-details")
+                            .label("Close")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
+                )
         });
     }
 
@@ -428,17 +473,97 @@ impl BrewView {
             }
             row = row.child(versions);
             let package = package.clone();
+            let view = cx.entity().downgrade();
             row = row.child(
-                Button::new(("uninstall-package", index))
-                    .ghost()
-                    .small()
-                    .icon(IconName::Trash)
-                    .accessibility_label("Uninstall…")
-                    .disabled(self.busy)
-                    .when(!self.busy, |button| button.cursor_pointer())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.confirm_removal(package.clone(), window, cx)
-                    })),
+                Button::new(SharedString::from(format!(
+                    "package-actions:{}:{}",
+                    package.kind.flag(),
+                    package.name
+                )))
+                .ghost()
+                .small()
+                .icon(IconName::EllipsisVertical)
+                .accessibility_label(format!("Actions for {}", package.name))
+                .tooltip("Package actions")
+                .disabled(self.busy)
+                .dropdown_menu_with_anchor(
+                    Anchor::TopRight,
+                    move |menu, _, _| {
+                        let details_package = package.clone();
+                        let details_view = view.clone();
+                        let homepage_package = package.clone();
+                        let homepage_view = view.clone();
+                        let reinstall_package = package.clone();
+                        let reinstall_view = view.clone();
+                        let versions_package = package.clone();
+                        let versions_view = view.clone();
+                        let removal_package = package.clone();
+                        let removal_view = view.clone();
+                        menu.item(
+                            PopupMenuItem::new("Package details…")
+                                .icon(IconName::Info)
+                                .on_click(move |_, window, cx| {
+                                    let _ = details_view.update(cx, |this, cx| {
+                                        this.show_details(details_package.clone(), window, cx);
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Open homepage")
+                                .icon(IconName::ExternalLink)
+                                .on_click(move |_, _, cx| {
+                                    let _ = homepage_view.update(cx, |this, cx| {
+                                        this.operate(
+                                            Operation::Homepage,
+                                            homepage_package.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Reinstall")
+                                .icon(IconName::RefreshCw)
+                                .on_click(move |_, _, cx| {
+                                    let _ = reinstall_view.update(cx, |this, cx| {
+                                        this.operate(
+                                            Operation::Reinstall,
+                                            reinstall_package.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        )
+                        .when(package.kind == Kind::Formula, |menu| {
+                            menu.item(
+                                PopupMenuItem::new("Install another version…")
+                                    .icon(IconName::Download)
+                                    .on_click(move |_, window, cx| {
+                                        let _ = versions_view.update(cx, |this, cx| {
+                                            this.other_versions(&versions_package, window, cx);
+                                        });
+                                    }),
+                            )
+                        })
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Uninstall…")
+                                .icon(IconName::Trash)
+                                .on_click(move |_, window, cx| {
+                                    let _ = removal_view.update(cx, |this, cx| {
+                                        if !this.busy {
+                                            this.confirm_removal(
+                                                removal_package.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    });
+                                }),
+                        )
+                    },
+                ),
             );
         } else {
             let package = package.clone();
@@ -483,6 +608,51 @@ impl BrewView {
             )
             .child(Tag::secondary().small().child(count.to_string()))
             .text_color(cx.theme().muted_foreground)
+    }
+}
+
+struct PackageDetails {
+    output: String,
+    failed: bool,
+}
+
+impl PackageDetails {
+    fn new(brew: PathBuf, package: Package, cx: &mut Context<Self>) -> Self {
+        let task =
+            cx.background_spawn(
+                async move { brew::execute(&brew, Operation::Info, &package, |_| {}) },
+            );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |details, cx| {
+                details.failed = result.is_err();
+                details.output = result.unwrap_or_else(|error| error);
+                cx.notify();
+            });
+        })
+        .detach();
+        Self {
+            output: "Loading package details…".into(),
+            failed: false,
+        }
+    }
+}
+
+impl Render for PackageDetails {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("package-details")
+            .test_support()
+            .role(Role::Status)
+            .aria_label(self.output.clone())
+            .text_sm()
+            .font_family("Menlo")
+            .text_color(if self.failed {
+                cx.theme().danger
+            } else {
+                cx.theme().foreground
+            })
+            .child(self.output.clone())
     }
 }
 
@@ -735,6 +905,150 @@ mod tests {
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
     #[gpui_kit::test]
+    async fn package_details_and_homepage_handle_formulae_casks_and_errors(
+        cx: &mut TestAppContext,
+    ) {
+        let directory =
+            std::env::temp_dir().join(format!("homebrew-gui-details-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let brew = directory.join("brew");
+        std::fs::write(&brew, r##"#!/bin/sh
+case "$1" in
+  info)
+    if [ "$2" = --json=v2 ]; then
+      printf x >> "$0.inventory"
+      printf '%s' '{"formulae":[{"full_name":"wget","desc":"Downloader","installed":[{"version":"1.0"}],"versions":{"stable":"1.0"},"outdated":false}],"casks":[{"token":"wget-app","desc":"App","installed":"1.0","version":"1.0","outdated":false}]}'
+    else
+      if [ "$3" != -- ]; then exit 8; fi
+      if [ -f "$0.details-error" ]; then echo 'Package information unavailable' >&2; exit 9; fi
+      printf '%s\n' "$4: 1.0 ($2)" 'https://example.test' "/opt/homebrew/packages/$4" '==> Dependencies' 'Required: libidn2' '==> Caveats' 'Add the installation directory to your PATH.'
+    fi;;
+  home)
+    printf '%s\n' "$@" > "$0.homepage"
+    if [ -f "$0.homepage-error" ]; then echo 'Could not open browser' >&2; exit 9; fi
+    echo 'Opening homepage';;
+  *) exit 8;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let handle = cx.open_window(size(px(1000.), px(720.)), |window, cx| {
+            let entity = cx.new(|cx| BrewView::new(Some(brew.clone()), window, cx));
+            view = Some(entity.clone());
+            Root::new(entity, window, cx)
+        });
+        let view = view.unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).busy
+        })
+        .await;
+        for (flag, name) in [("--formula", "wget"), ("--cask", "wget-app")] {
+            let menu_id = gpui_kit::SharedString::from(format!("package-actions:{flag}:{name}"));
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.click(menu_id.clone(), cx);
+                assert_eq!(
+                    window.within("popup-menu").find(0usize).label(),
+                    Some("Package details…")
+                );
+                assert_eq!(
+                    window.within("popup-menu").find(1usize).label(),
+                    Some("Open homepage")
+                );
+                window.within("popup-menu").click(0usize, cx);
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find("package-details").label(),
+                    Some("Loading package details…")
+                );
+            })
+            .unwrap();
+            cx.wait_for(handle.into(), Duration::from_secs(5), |window, _| {
+                window
+                    .find("package-details")
+                    .label()
+                    .unwrap()
+                    .contains("Caveats")
+            })
+            .await;
+            cx.update_window(handle.into(), |_, window, cx| {
+                let details = window.find("package-details");
+                let text = details.label().unwrap();
+                assert!(text.contains(&format!("{name}: 1.0 ({flag})")));
+                assert!(text.contains(&format!("/opt/homebrew/packages/{name}")));
+                assert!(text.contains("Required: libidn2"));
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+                window.try_find("package-details").is_none()
+                    && window.try_find("popup-menu").is_none()
+            })
+            .await;
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.click(menu_id, cx);
+                window.within("popup-menu").click(1usize, cx);
+                assert!(view.read(cx).busy);
+            })
+            .unwrap();
+            cx.wait_for(handle.into(), Duration::from_secs(5), |window, cx| {
+                !view.read(cx).busy && window.try_find("popup-menu").is_none()
+            })
+            .await;
+            assert_eq!(
+                std::fs::read_to_string(brew.with_extension("homepage")).unwrap(),
+                format!("home\n{flag}\n--\n{name}\n")
+            );
+            cx.update(|cx| {
+                assert!(!view.read(cx).failed);
+                assert_eq!(view.read(cx).installed.len(), 2);
+            });
+        }
+        std::fs::write(brew.with_extension("details-error"), "").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("package-actions:--formula:wget", cx);
+            window.within("popup-menu").click(0usize, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |window, _| {
+            window
+                .find("package-details")
+                .label()
+                .unwrap()
+                .contains("Package information unavailable")
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("close-package-details", cx)
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("package-details").is_none() && window.try_find("popup-menu").is_none()
+        })
+        .await;
+        std::fs::write(brew.with_extension("homepage-error"), "").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("package-actions:--formula:wget", cx);
+            window.within("popup-menu").click(1usize, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).busy
+        })
+        .await;
+        cx.update(|cx| {
+            assert!(view.read(cx).failed);
+            assert!(view.read(cx).output.contains("Could not open browser"));
+            assert_eq!(view.read(cx).installed.len(), 2);
+        });
+        assert_eq!(
+            std::fs::read_to_string(brew.with_extension("inventory")).unwrap(),
+            "x"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn activity_stream_updates_while_busy(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut view = None;
@@ -869,14 +1183,25 @@ case "$1" in
     if [ -f "$0.installed" ]; then
       printf ',{"full_name":"wget2","desc":"Another downloader","installed":[{"version":"2.0"}],"versions":{"stable":"2.0"},"outdated":false}'
     fi
+    if [ -f "$0.versioned" ]; then
+      printf ',{"full_name":"wget@1","desc":"Older downloader","installed":[{"version":"1.0"}],"versions":{"stable":"1.0"},"outdated":false}'
+    fi
     printf '],"casks":[{"token":"wget-app","desc":"Downloader app","installed":"1.0","version":"2.0","outdated":true,"pinned":true}]}';;
   search)
-    if [ "$2" = --formula ]; then printf '%s\n' wget wget2;
+    if [ "$4" = wget@ ]; then
+      if [ "$2" = --formula ]; then printf '%s\n' wget@1; fi
+    elif [ "$2" = --formula ]; then printf '%s\n' wget wget2;
     else printf '%s\n' wget-app wget-studio; fi;;
   update)
     if [ -f "$0.offline" ]; then echo 'Network unavailable' >&2; exit 9; fi
     touch "$0.checked";;
-  install) touch "$0.installed"; echo 'Installed wget2';;
+  install)
+    if [ "$4" = wget@1 ]; then touch "$0.versioned";
+    else touch "$0.installed"; fi
+    echo "Installed $4";;
+  reinstall)
+    if [ "$2" != --formula ] || [ "$3" != -- ] || [ "$4" != wget ]; then exit 8; fi
+    touch "$0.reinstalled"; echo 'Reinstalled wget';;
   uninstall) touch "$0.removed";;
   upgrade)
     if [ "$4" != wget ]; then echo 'Unexpected update target' >&2; exit 8; fi
@@ -900,6 +1225,20 @@ esac
             !view.read(cx).busy
         })
         .await;
+        view.update(cx, |view, cx| {
+            view.busy = true;
+            cx.notify();
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("package-actions:--formula:wget", cx);
+            assert!(window.try_find("popup-menu").is_none());
+        })
+        .unwrap();
+        view.update(cx, |view, cx| {
+            view.busy = false;
+            cx.notify();
+        });
         cx.update(|cx| {
             use gpui_kit::component::{Theme, ThemeMode};
             for mode in [ThemeMode::Dark, ThemeMode::Light] {
@@ -1005,10 +1344,78 @@ esac
                 "Redraws preserve manual scrolling"
             );
             assert!(window.try_find(("update-package", 0usize)).is_none());
-            window.click(("uninstall-package", 0usize), cx);
+            window.click("package-actions:--cask:wget-app", cx);
+            assert_eq!(
+                window.within("popup-menu").find(3usize).label(),
+                Some("Reinstall")
+            );
+            assert_eq!(
+                window.within("popup-menu").find(5usize).label(),
+                Some("Uninstall…")
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("popup-menu").is_none()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("package-search", cx);
+            for _ in 0..8 {
+                window.press("tab", cx);
+                if window.find("package-actions:--cask:wget-app").focused() == Some(true) {
+                    break;
+                }
+            }
+            assert_eq!(
+                window.find("package-actions:--cask:wget-app").focused(),
+                Some(true)
+            );
+            window.press("enter", cx);
+            assert!(window.try_find("popup-menu").is_some());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("popup-menu").is_none()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(
+                window.find("package-actions:--cask:wget-app").focused(),
+                Some(true)
+            );
+            window.click("package-actions:--formula:wget", cx);
+            assert_eq!(
+                window.within("popup-menu").find(4usize).label(),
+                Some("Install another version…")
+            );
+            window.within("popup-menu").click(6usize, cx);
             window.render_frame(cx);
             window.click("cancel", cx);
             assert!(!brew.with_extension("removed").exists());
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(1), |window, _| {
+            window.try_find("popup-menu").is_none() && window.try_find("cancel").is_none()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("package-actions:--formula:wget", cx);
+            for _ in 0..3 {
+                window.press("down", cx);
+            }
+            window.press("enter", cx);
+            assert!(view.read(cx).busy);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).busy
+        })
+        .await;
+        assert!(brew.with_extension("reinstalled").exists());
+        cx.update_window(handle.into(), |_, window, cx| {
             window.click("package-search", cx);
             window.input("wget", cx);
             window.render_frame(cx);
@@ -1114,6 +1521,39 @@ esac
             assert!(view.read(cx).output.contains("Network unavailable"));
             assert_eq!(view.read(cx).installed.len(), 3);
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("package-actions:--formula:wget", cx);
+            window.within("popup-menu").click(4usize, cx);
+            assert_eq!(window.find("package-search").value(), Some("wget@"));
+            assert_eq!(window.find("package-search").focused(), Some(true));
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).searching
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(view.read(cx).search_results[0].name, "wget@1");
+            window.click(("install-package", 0usize), cx);
+            assert!(view.read(cx).busy);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).busy
+        })
+        .await;
+        assert!(brew.with_extension("versioned").exists());
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(view.read(cx).installed.len(), 4);
+            window.click("package-actions:--formula:wget@1", cx);
+            window.within("popup-menu").click(4usize, cx);
+            assert_eq!(window.find("package-search").value(), Some("wget@"));
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).searching
+        })
+        .await;
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

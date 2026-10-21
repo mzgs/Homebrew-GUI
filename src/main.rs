@@ -12,8 +12,20 @@ use window_state::WindowState;
 gpui_kit::assets::icon_assets!(
     SettingsIcons,
     [
-        Upload, Download, Beer, Search, AppWindow, Terminal, ArrowUp, ArrowRight, Trash, RefreshCw,
-        Activity
+        Upload,
+        Download,
+        Beer,
+        Search,
+        AppWindow,
+        Terminal,
+        ArrowUp,
+        ArrowRight,
+        Trash,
+        RefreshCw,
+        Activity,
+        EllipsisVertical,
+        Info,
+        ExternalLink
     ]
 );
 
