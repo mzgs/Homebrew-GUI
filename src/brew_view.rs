@@ -874,7 +874,7 @@ impl Render for BrewView {
                         div()
                             .id("brew-output")
                             .test_support()
-                            .h(px(140.))
+                            .h_24()
                             .overflow_y_scroll()
                             .track_scroll(&self.output_scroll)
                             .rounded_md()
