@@ -3,8 +3,8 @@
 A small native Rust desktop app for your existing Homebrew installation.
 
 - One search bar shows all installed formulae and macOS apps when empty.
-- As you type, matching **Installed** and **Available packages** appear in separate sections without duplicates.
-- Installed packages show their current version. Available updates have an **Update** button. Pinned packages stay pinned.
+- Packages are grouped into **Casks** and **Formulas**. As you type, installed and available matches appear together without duplicates.
+- Installed packages have a checkmark and show their current version. Available updates have an **Update** button. Pinned packages stay pinned.
 - Install or uninstall directly from the list. Removal requires confirmation.
 - **Refresh** fetches Homebrew’s latest metadata and checks package versions again. Startup uses the available metadata for a quick initial list; a failed refresh keeps cached versions visible.
 - Commands run in the background, one at a time. Live output and errors appear in the activity panel, which scrolls to the latest output.

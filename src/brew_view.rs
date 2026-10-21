@@ -363,8 +363,26 @@ impl BrewView {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_ellipsis()
-                            .child(package.name.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(package.installed, |name| {
+                                name.child(
+                                    div()
+                                        .id(("installed-checkmark", index))
+                                        .test_support()
+                                        .role(Role::Status)
+                                        .aria_label("Installed")
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .child(
+                                            Icon::new(IconName::Check)
+                                                .size_4()
+                                                .text_color(cx.theme().success),
+                                        ),
+                                )
+                            })
+                            .child(div().min_w_0().text_ellipsis().child(package.name.clone())),
                     )
                     .child(
                         div()
@@ -485,19 +503,31 @@ impl Render for BrewView {
             .search_results
             .iter()
             .enumerate()
-            .filter(|(_, p)| !p.installed)
+            .filter(|(_, p)| !filter.is_empty() && !p.installed)
             .collect();
-        let mut rows = vec![PackageListRow::Heading(
-            "installed-section",
-            "Installed",
-            installed.len(),
-        )];
-        rows.extend(
-            installed
+        let mut rows = Vec::new();
+        for (kind, id, title) in [
+            (Kind::Cask, "casks-section", "Casks"),
+            (Kind::Formula, "formulas-section", "Formulas"),
+        ] {
+            let mut packages: Vec<_> = installed
                 .iter()
-                .map(|(index, _)| PackageListRow::Installed(*index)),
-        );
-        if installed.is_empty() {
+                .filter(|(_, p)| p.kind == kind)
+                .map(|(index, package)| (*package, PackageListRow::Installed(*index)))
+                .chain(
+                    available
+                        .iter()
+                        .filter(|(_, p)| p.kind == kind)
+                        .map(|(index, package)| (*package, PackageListRow::Available(*index))),
+                )
+                .collect();
+            packages.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+            if !packages.is_empty() {
+                rows.push(PackageListRow::Heading(id, title, packages.len()));
+                rows.extend(packages.into_iter().map(|(_, row)| row));
+            }
+        }
+        if rows.is_empty() && !self.searching && self.search_error.is_none() {
             rows.push(PackageListRow::Message(
                 if self.busy {
                     "Reading installed packages…"
@@ -506,34 +536,18 @@ impl Render for BrewView {
                 } else if filter.is_empty() {
                     "No installed packages."
                 } else {
-                    "No installed packages match your search."
+                    "No packages match your search."
                 }
                 .into(),
                 false,
             ));
         }
         if !filter.is_empty() {
-            rows.push(PackageListRow::Heading(
-                "available-section",
-                "Available packages",
-                available.len(),
-            ));
             if self.searching {
                 rows.push(PackageListRow::Message("Searching Homebrew…".into(), false));
             }
             if let Some(error) = &self.search_error {
                 rows.push(PackageListRow::Message(error.clone(), true));
-            }
-            rows.extend(
-                available
-                    .iter()
-                    .map(|(index, _)| PackageListRow::Available(*index)),
-            );
-            if !self.searching && self.search_error.is_none() && available.is_empty() {
-                rows.push(PackageListRow::Message(
-                    "No additional packages found.".into(),
-                    false,
-                ));
             }
         }
         if rows != self.list_rows {
@@ -830,7 +844,9 @@ mod tests {
             window.click("package-search", cx);
             window.input("package-0999", cx);
             window.render_frame(cx);
-            assert!(window.try_find("installed-section").is_some());
+            assert!(window.try_find("installed-section").is_none());
+            assert!(window.try_find("casks-section").is_none());
+            assert_eq!(window.find("formulas-section").label(), Some("Formulas"));
             assert!(window.try_find(("installed-package", 999usize)).is_some());
             assert!(window.try_find(("installed-package", 998usize)).is_none());
         })
@@ -898,9 +914,29 @@ esac
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(view.read(cx).installed.len(), 2);
-            assert!(window.try_find("installed-section").is_some());
+            assert!(window.try_find("installed-section").is_none());
+            assert_eq!(window.find("casks-section").label(), Some("Casks"));
+            assert_eq!(window.find("formulas-section").label(), Some("Formulas"));
+            assert!(
+                window.find("casks-section").bounds().bottom()
+                    <= window.find(("installed-package", 1usize)).bounds().top()
+            );
+            assert!(
+                window.find(("installed-package", 1usize)).bounds().bottom()
+                    <= window.find("formulas-section").bounds().top()
+            );
+            assert!(
+                window.find("formulas-section").bounds().bottom()
+                    <= window.find(("installed-package", 0usize)).bounds().top()
+            );
             assert!(window.try_find("available-section").is_none());
             assert!(window.try_find("installed-tab").is_none());
+            for index in [0usize, 1] {
+                assert_eq!(
+                    window.find(("installed-checkmark", index)).label(),
+                    Some("Installed")
+                );
+            }
             assert_eq!(window.find(("versions", 0usize)).label(), Some("1.0"));
             assert_eq!(
                 window.find(("update-package", 0usize)).label(),
@@ -976,8 +1012,8 @@ esac
             window.click("package-search", cx);
             window.input("wget", cx);
             window.render_frame(cx);
-            assert!(window.try_find("installed-section").is_some());
-            assert!(window.try_find("available-section").is_some());
+            assert!(window.try_find("installed-section").is_none());
+            assert!(window.try_find("available-section").is_none());
         })
         .unwrap();
         // The debounce uses the test executor's clock.
@@ -997,6 +1033,30 @@ esac
             );
             assert!(window.try_find(("available-package", 1usize)).is_none());
             assert!(window.try_find(("available-package", 2usize)).is_some());
+            assert!(window.try_find(("installed-checkmark", 2usize)).is_none());
+            assert!(window.try_find(("installed-checkmark", 3usize)).is_none());
+            assert_eq!(window.find("casks-section").label(), Some("Casks"));
+            assert_eq!(window.find("formulas-section").label(), Some("Formulas"));
+            assert!(
+                window.find("casks-section").bounds().bottom()
+                    <= window.find(("installed-package", 1usize)).bounds().top()
+            );
+            assert!(
+                window.find(("installed-package", 1usize)).bounds().bottom()
+                    <= window.find(("available-package", 2usize)).bounds().top()
+            );
+            assert!(
+                window.find(("available-package", 2usize)).bounds().bottom()
+                    <= window.find("formulas-section").bounds().top()
+            );
+            assert!(
+                window.find("formulas-section").bounds().bottom()
+                    <= window.find(("installed-package", 0usize)).bounds().top()
+            );
+            assert!(
+                window.find(("installed-package", 0usize)).bounds().bottom()
+                    <= window.find(("available-package", 3usize)).bounds().top()
+            );
             window.click(("install-package", 3usize), cx);
             assert!(view.read(cx).busy);
         })
@@ -1010,11 +1070,16 @@ esac
             assert_eq!(view.read(cx).installed.len(), 3);
             assert!(window.try_find(("available-package", 3usize)).is_none());
             assert!(window.try_find(("installed-package", 2usize)).is_some());
+            assert_eq!(
+                window.find(("installed-checkmark", 2usize)).label(),
+                Some("Installed")
+            );
             window.click("package-search", cx);
             window.press("secondary-a", cx);
             window.input("no-match", cx);
             window.render_frame(cx);
             assert!(window.try_find(("installed-package", 0usize)).is_none());
+            assert!(window.try_find(("installed-checkmark", 0usize)).is_none());
             window.press("secondary-a", cx);
             window.press("backspace", cx);
             window.render_frame(cx);
