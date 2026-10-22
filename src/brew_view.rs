@@ -796,7 +796,7 @@ impl Render for BrewView {
                                 div()
                                     .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Homebrew"),
+                                    .child("Homebrew GUI"),
                             )
                             .child(div().flex_1())
                             .child(

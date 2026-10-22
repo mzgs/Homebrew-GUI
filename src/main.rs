@@ -200,7 +200,7 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowState::window_bounds(restored.as_ref(), cx)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Homebrew".into()),
+                title: Some("Homebrew GUI".into()),
                 ..Default::default()
             }),
             window_min_size: Some(size(px(900.), px(560.))),
