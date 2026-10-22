@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Build and publish the next patch release for Apple Silicon and Intel Macs."""
+"""Tag the next patch release for GitHub Actions to build and publish."""
 
 import argparse
-from contextlib import nullcontext
 import http.client
 import json
 import os
@@ -11,11 +10,10 @@ import re
 import subprocess
 import sys
 import tomllib
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
-TARGETS = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 
 
 def run(*command, capture=False):
@@ -57,27 +55,20 @@ def next_version(current, tags):
     return f"{major}.{minor}.{patch + 1}"
 
 
-def github(token, method, path, data=None, asset=None):
+def github(token, path):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "homebrew-gui-release",
         "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/zip" if asset else "application/json",
     }
-    if asset:
-        headers["Content-Length"] = str(asset.stat().st_size)
-    connection = http.client.HTTPSConnection(
-        "uploads.github.com" if asset else "api.github.com", timeout=120
-    )
-    body = asset.open("rb") if asset else nullcontext(json.dumps(data).encode() if data else None)
+    connection = http.client.HTTPSConnection("api.github.com", timeout=120)
     try:
-        with body as payload:
-            connection.request(method, path, body=payload, headers=headers)
-            response = connection.getresponse()
-            result = response.read()
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        result = response.read()
         if not 200 <= response.status < 300:
-            raise RuntimeError(f"GitHub {method} failed (HTTP {response.status}).")
+            raise RuntimeError(f"GitHub GET failed (HTTP {response.status}).")
         return json.loads(result) if result else None
     finally:
         connection.close()
@@ -85,15 +76,13 @@ def github(token, method, path, data=None, asset=None):
 
 def release():
     os.chdir(ROOT)
-    if sys.platform != "darwin":
-        raise RuntimeError("Releases must be built on macOS with Xcode command line tools.")
     if git("status", "--porcelain"):
         raise RuntimeError("Commit or stash all changes, including untracked files, first.")
     branch = git("symbolic-ref", "--short", "HEAD")
     git("var", "GIT_AUTHOR_IDENT")
     git("var", "GIT_COMMITTER_IDENT")
     repo, token = credentials(git("remote", "get-url", "origin"))
-    github(token, "GET", f"/repos/{repo}")
+    github(token, f"/repos/{repo}")
     git("fetch", "--tags", "origin")
 
     manifest = ROOT / "Cargo.toml"
@@ -114,37 +103,17 @@ def release():
         if count != 1:
             raise RuntimeError(f"Expected exactly one package version in {file.name}.")
 
-    print(f"Building {tag} for Apple Silicon and Intel…", flush=True)
-    run("rustup", "target", "add", "--toolchain", "stable", *TARGETS.values())
+    print(f"Queuing {tag} for GitHub Actions…", flush=True)
     committed = False
     try:
         for file, content in updated.items():
             file.write_text(content)
-        run("rustup", "run", "stable", "cargo", "test", "--locked")
-        output = ROOT / "target" / "releases" / tag
-        output.mkdir(parents=True, exist_ok=True)
-        assets = []
-        for arch, target in TARGETS.items():
-            run("./build.sh", target)
-            asset = output / f"{name}-{tag}-macos-{arch}.zip"
-            run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-                str(ROOT / "target" / target / "release" / f"{name}.app"), str(asset))
-            assets.append(asset)
-
         git("add", "--", "Cargo.toml", "Cargo.lock")
         git("commit", "-m", f"Release {tag}")
         committed = True
         git("tag", "-a", tag, "-m", f"Release {tag}")
         git("push", "--atomic", "origin", f"HEAD:refs/heads/{branch}", f"refs/tags/{tag}")
-        draft = github(token, "POST", f"/repos/{repo}/releases", {
-            "tag_name": tag, "name": tag, "draft": True, "generate_release_notes": True,
-        })
-        for asset in assets:
-            print(f"Uploading {asset.name}…", flush=True)
-            github(token, "POST", f"/repos/{repo}/releases/{draft['id']}/assets?"
-                   + urlencode({"name": asset.name}), asset=asset)
-        published = github(token, "PATCH", f"/repos/{repo}/releases/{draft['id']}", {"draft": False})
-        print(f"Released {tag}: {published['html_url']}")
+        print(f"Pushed {tag}. Follow the build and publication: https://github.com/{repo}/actions")
     finally:
         if not committed:
             for file, content in originals.items():
@@ -158,5 +127,5 @@ if __name__ == "__main__":
         release()
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
         print(f"Release failed: {error}", file=sys.stderr)
-        print("Any release commit, tag, or draft already created is kept for recovery.", file=sys.stderr)
+        print("Any release commit or tag already created is kept for recovery.", file=sys.stderr)
         sys.exit(1)

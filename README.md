@@ -32,31 +32,39 @@ Run checks:
 cargo test --locked
 ```
 
-Publish a GitHub release (macOS, Python 3.11+, stable Rust, and Xcode command line tools):
+Start a GitHub release (Python 3.11+ and Git; no local Rust or macOS build tools needed):
 
 ```sh
 python3 release.py
 ```
 
-Commit all changes first. The script reads the GitHub token already embedded in the
+Commit all changes, including `.github/workflows/release.yml`, first, and enable
+GitHub Actions in the repository. The script reads the GitHub token already embedded in the
 HTTPS `origin` URL in `.git/config`; it does not print or copy the token. The token
-needs repository contents write access. It fetches tags, increments the highest
+needs repository contents write access and permission to push workflow files
+(`workflow` scope for a classic token). It fetches tags, increments the highest
 stable version from `Cargo.toml` and the tags by one patch (for example, `0.1.0` →
-`0.1.1`), updates `Cargo.toml`, `Cargo.lock`, and the app bundle versions, and runs
-the Rust tests. It installs both Rust targets and builds separate Apple Silicon
-(`arm64`) and Intel (`x86_64`) app ZIPs.
+`0.1.1`), updates `Cargo.toml` and `Cargo.lock`, and commits the version bump.
 
-The script commits the version bump, pushes the current branch and the new tag
-atomically to `origin`, then creates a release with generated notes. The release
-stays a draft until both ZIPs finish uploading. ZIPs are also saved under
-`target/releases/vVERSION/`. No GitHub CLI or Python packages are required.
+The script pushes the current branch and the new tag atomically to `origin`,
+then prints the GitHub Actions link. The **Release** workflow runs the Python
+and Rust tests and builds separate Apple Silicon (`arm64`) and Intel (`x86_64`)
+app ZIPs on [GitHub-hosted macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Bundle versions come from `Cargo.toml`.
+After both builds pass, it uploads both ZIPs and publishes **Homebrew GUI vVERSION**
+with generated release notes. A release stays a draft until both ZIPs are uploaded.
+Publishing uses GitHub's automatic `GITHUB_TOKEN` with contents write permission;
+no extra repository secrets are needed. No builds or ZIPs are created locally,
+and no local GitHub CLI or Python packages are required.
+
 `./build.sh aarch64-apple-darwin` and `./build.sh x86_64-apple-darwin` can also build
 each architecture separately under `target/<target>/release/`.
 
-Build or test failures restore the original version files. After a release commit
-has been created, failures keep the commit, tag, and any draft for recovery;
-finish pushing or upload the saved ZIPs and publish the draft through GitHub
-before starting another release. Builds are ad-hoc signed, without Apple
+Failures before the version commit restore the original version files. After a
+release commit has been created, failures keep the commit and tag for recovery;
+retry the atomic push if needed. For build or publication failures, fix the cause
+and rerun the workflow in GitHub Actions; publication can resume an existing draft.
+Source fixes require a new commit and release tag. Builds are ad-hoc signed, without Apple
 notarization, so downloaded apps may require approval in macOS Privacy & Security.
 
 Check the release script without publishing anything:

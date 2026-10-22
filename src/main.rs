@@ -242,7 +242,7 @@ fn main() {
         });
         settings_view::register_action(handle, settings_path, startup_error.clone(), cx);
         cx.set_menus(vec![Menu {
-            name: env!("CARGO_PKG_NAME").into(),
+            name: "Homebrew GUI".into(),
             disabled: false,
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
