@@ -51,6 +51,7 @@ pub(crate) enum Operation {
     Install,
     Reinstall,
     Upgrade,
+    Cleanup,
     Uninstall,
 }
 
@@ -62,7 +63,24 @@ impl Operation {
             Self::Install => "install",
             Self::Reinstall => "reinstall",
             Self::Upgrade => "upgrade",
+            Self::Cleanup => "cleanup",
             Self::Uninstall => "uninstall",
+        }
+    }
+
+    pub(crate) fn args(self, package: Option<&Package>) -> Result<Vec<&str>, String> {
+        match (self, package) {
+            (Self::Cleanup, None) => Ok(vec![self.command(), "--prune=all"]),
+            (Self::Upgrade, None) => Ok(vec![self.command()]),
+            (Self::Cleanup, Some(_)) => Err("Cache cleanup applies to all packages.".into()),
+            (_, Some(package)) if valid_name(&package.name) => Ok(vec![
+                self.command(),
+                package.kind.flag(),
+                "--",
+                &package.name,
+            ]),
+            (_, Some(_)) => Err("Invalid package name.".into()),
+            (_, None) => Err("Choose a package for this command.".into()),
         }
     }
 }
@@ -292,6 +310,36 @@ pub(crate) fn installed(brew: &Path) -> Result<Vec<Package>, String> {
     parse_inventory(&output.stdout)
 }
 
+pub(crate) fn cache_size(brew: &Path) -> Result<String, String> {
+    let output = run(brew, &["--cache"])?;
+    if !output.status.success() {
+        return Err(failure(&output));
+    }
+    let cache = String::from_utf8(output.stdout)
+        .map_err(|error| format!("Couldn’t read the Homebrew cache path: {error}"))?;
+    let path = Path::new(cache.trim());
+    if !path.is_absolute() {
+        return Err("Homebrew returned an unexpected cache path.".into());
+    }
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok("0B".into());
+    }
+    let output = Command::new("/usr/bin/du")
+        .arg("-sh")
+        .arg(path)
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| format!("Couldn’t measure the Homebrew cache: {error}"))?;
+    if !output.status.success() {
+        return Err(output_text(&output));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .ok_or_else(|| "Couldn’t read the Homebrew cache size.".into())
+}
+
 pub(crate) fn update_catalog(brew: &Path, on_output: impl FnMut(&str)) -> Result<(), String> {
     let output = run_streamed(brew, &["update"], on_output)?;
     if !output.status.success() {
@@ -360,22 +408,10 @@ pub(crate) fn search(
 pub(crate) fn execute(
     brew: &Path,
     operation: Operation,
-    package: &Package,
+    package: Option<&Package>,
     on_output: impl FnMut(&str),
 ) -> Result<String, String> {
-    if !valid_name(&package.name) {
-        return Err("Invalid package name.".into());
-    }
-    let output = run_streamed(
-        brew,
-        &[
-            operation.command(),
-            package.kind.flag(),
-            "--",
-            &package.name,
-        ],
-        on_output,
-    )?;
+    let output = run_streamed(brew, &operation.args(package)?, on_output)?;
     if !output.status.success() {
         return Err(failure(&output));
     }
@@ -489,6 +525,10 @@ exit 9
             &script,
             r##"#!/bin/sh
 case "$1" in
+  --cache)
+    if [ -f "$0.cache-error" ]; then echo 'Cache unavailable' >&2; exit 9; fi
+    echo 'Homebrew notice' >&2
+    printf '%s\n' "$0 cache";;
   info) printf '%s' '{"formulae":[],"casks":[]}';;
   search)
     if [ "$2" = --formula ]; then printf '%s\n' 'wget' 'wget2';
@@ -500,20 +540,41 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(cache_size(&script).unwrap(), "0B");
+        let cache = directory.join("brew cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join("download"), vec![0; 2 * 1024 * 1024]).unwrap();
+        assert!(cache_size(&script).unwrap().contains('M'));
+        std::fs::write(script.with_extension("cache-error"), "").unwrap();
+        assert!(
+            cache_size(&script)
+                .unwrap_err()
+                .contains("Cache unavailable")
+        );
         assert!(installed(&script).unwrap().is_empty());
         let results = search(&script, "wget", &[]).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
-            execute(&script, Operation::Install, &results[0], |_| {}).unwrap(),
+            execute(&script, Operation::Install, Some(&results[0]), |_| {}).unwrap(),
             "install\n--formula\n--\nwget"
         );
         assert_eq!(
-            execute(&script, Operation::Reinstall, &results[0], |_| {}).unwrap(),
+            execute(&script, Operation::Reinstall, Some(&results[0]), |_| {}).unwrap(),
             "reinstall\n--formula\n--\nwget"
         );
-        let error = execute(&script, Operation::Upgrade, &results[0], |_| {}).unwrap_err();
+        let error = execute(&script, Operation::Upgrade, Some(&results[0]), |_| {}).unwrap_err();
         assert!(error.contains('9') && error.contains("Network unavailable"));
         assert!(search(&script, "--help", &[]).is_err());
+        assert_eq!(Operation::Upgrade.args(None).unwrap(), ["upgrade"]);
+        assert_eq!(
+            Operation::Cleanup.args(None).unwrap(),
+            ["cleanup", "--prune=all"]
+        );
+        assert!(execute(&script, Operation::Uninstall, None, |_| {}).is_err());
+        assert!(execute(&script, Operation::Cleanup, Some(&results[0]), |_| {}).is_err());
+        let mut invalid = results[0].clone();
+        invalid.name = "--force".into();
+        assert!(execute(&script, Operation::Upgrade, Some(&invalid), |_| {}).is_err());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

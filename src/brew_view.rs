@@ -29,6 +29,7 @@ pub(crate) struct BrewView {
     list_scroll: ListState,
     list_rows: Vec<PackageListRow>,
     installed: Vec<Package>,
+    cache_size: Result<String, String>,
     search_results: Vec<Package>,
     search_task: Option<Task<()>>,
     search_id: u64,
@@ -60,6 +61,7 @@ impl BrewView {
             list_scroll: ListState::new(0, ListAlignment::Top, px(500.)),
             list_rows: Vec::new(),
             installed: Vec::new(),
+            cache_size: Err("Cache size hasn’t been measured yet.".into()),
             search_results: Vec::new(),
             search_task: None,
             search_id: 0,
@@ -133,13 +135,18 @@ impl BrewView {
                 None
             };
             drop(sender);
-            (brew::installed(&brew), update_error)
+            (
+                brew::installed(&brew),
+                update_error,
+                brew::cache_size(&brew),
+            )
         });
         cx.spawn(async move |this, cx| {
             output_task.await;
-            let (result, update_error) = task.await;
+            let (result, update_error, cache_size) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                this.cache_size = cache_size;
                 match result {
                     Ok(packages) => {
                         this.set_installed(packages);
@@ -217,12 +224,22 @@ impl BrewView {
         cx.notify();
     }
 
-    fn operate(&mut self, operation: Operation, package: Package, cx: &mut Context<Self>) {
+    fn operate(&mut self, operation: Operation, package: Option<Package>, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
         let Some(brew) = self.brew.clone() else {
             return;
+        };
+        let command = match operation.args(package.as_ref()) {
+            Ok(args) => args.join(" "),
+            Err(error) => {
+                self.status = "Homebrew command failed".into();
+                self.output = error;
+                self.failed = true;
+                cx.notify();
+                return;
+            }
         };
         let refresh_packages = !matches!(operation, Operation::Info | Operation::Homepage);
         if refresh_packages {
@@ -230,28 +247,27 @@ impl BrewView {
         }
         self.busy = true;
         self.failed = false;
-        self.status = format!("Running brew {} {}…", operation.command(), package.name);
-        let (sender, output_task) = self.stream_output(
-            format!(
-                "$ brew {} {} -- {}\n\n",
-                operation.command(),
-                package.kind.flag(),
-                package.name
-            ),
-            cx,
-        );
+        self.status = format!("Running brew {command}…");
+        let (sender, output_task) = self.stream_output(format!("$ brew {command}\n\n"), cx);
         let task = cx.background_spawn(async move {
-            let result = brew::execute(&brew, operation, &package, |output| {
+            let result = brew::execute(&brew, operation, package.as_ref(), |output| {
                 let _ = sender.force_send(output.into());
             });
             drop(sender);
-            (result, refresh_packages.then(|| brew::installed(&brew)))
+            (
+                result,
+                refresh_packages.then(|| brew::installed(&brew)),
+                refresh_packages.then(|| brew::cache_size(&brew)),
+            )
         });
         cx.spawn(async move |this, cx| {
             output_task.await;
-            let (result, installed) = task.await;
+            let (result, installed, cache_size) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
+                if let Some(cache_size) = cache_size {
+                    this.cache_size = cache_size;
+                }
                 match result {
                     Ok(output) => {
                         this.status = "Finished successfully".into();
@@ -318,7 +334,7 @@ impl BrewView {
                 .description("Homebrew will remove this package. Packages that depend on it may prevent removal. App preferences are not explicitly deleted.")
                 .ok_text("Uninstall")
                 .on_ok(move |_, _, cx| {
-                    view.update(cx, |this, cx| this.operate(Operation::Uninstall, package.clone(), cx));
+                    view.update(cx, |this, cx| this.operate(Operation::Uninstall, Some(package.clone()), cx));
                     true
                 })
         });
@@ -467,7 +483,7 @@ impl BrewView {
                             button.cursor_pointer()
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.operate(Operation::Upgrade, package.clone(), cx)
+                            this.operate(Operation::Upgrade, Some(package.clone()), cx)
                         })),
                 );
             }
@@ -515,7 +531,7 @@ impl BrewView {
                                     let _ = homepage_view.update(cx, |this, cx| {
                                         this.operate(
                                             Operation::Homepage,
-                                            homepage_package.clone(),
+                                            Some(homepage_package.clone()),
                                             cx,
                                         );
                                     });
@@ -529,7 +545,7 @@ impl BrewView {
                                     let _ = reinstall_view.update(cx, |this, cx| {
                                         this.operate(
                                             Operation::Reinstall,
-                                            reinstall_package.clone(),
+                                            Some(reinstall_package.clone()),
                                             cx,
                                         );
                                     });
@@ -576,7 +592,7 @@ impl BrewView {
                     .disabled(self.busy)
                     .when(!self.busy, |button| button.cursor_pointer())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.operate(Operation::Install, package.clone(), cx)
+                        this.operate(Operation::Install, Some(package.clone()), cx)
                     })),
             );
         }
@@ -618,10 +634,9 @@ struct PackageDetails {
 
 impl PackageDetails {
     fn new(brew: PathBuf, package: Package, cx: &mut Context<Self>) -> Self {
-        let task =
-            cx.background_spawn(
-                async move { brew::execute(&brew, Operation::Info, &package, |_| {}) },
-            );
+        let task = cx.background_spawn(async move {
+            brew::execute(&brew, Operation::Info, Some(&package), |_| {})
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |details, cx| {
@@ -794,6 +809,37 @@ impl Render for BrewView {
                                     .child("Homebrew"),
                             )
                             .child(div().flex_1())
+                            .child(
+                                Button::new("upgrade-all")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::ArrowUp)
+                                    .label("Upgrade all")
+                                    .tooltip(
+                                        "Upgrade outdated packages; pinned packages are skipped",
+                                    )
+                                    .disabled(self.busy || self.brew.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.operate(Operation::Upgrade, None, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("clean-cache")
+                                    .outline()
+                                    .small()
+                                    .label(match &self.cache_size {
+                                        Ok(size) => format!("Clean cache ({size})"),
+                                        Err(_) => "Clean cache".into(),
+                                    })
+                                    .tooltip(match &self.cache_size {
+                                        Ok(_) => "Total cache disk usage. Remove cached downloads and old package versions.".into(),
+                                        Err(error) => format!("Remove cached downloads and old package versions. Cache size unavailable: {error}"),
+                                    })
+                                    .disabled(self.busy || self.brew.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.operate(Operation::Cleanup, None, cx)
+                                    })),
+                            )
                             .child(
                                 Button::new("refresh-packages")
                                     .outline()
@@ -1177,6 +1223,9 @@ esac
         let brew = directory.join("brew");
         std::fs::write(&brew, r##"#!/bin/sh
 case "$1" in
+  --cache)
+    if [ -f "$0.cache-error" ]; then echo 'Cache unavailable' >&2; exit 9; fi
+    printf '%s\n' "$0 cache";;
   info)
     if [ -f "$0.upgraded" ]; then version=1.1; outdated=false; else version=1.0; outdated=true; fi
     printf '{"formulae":[{"full_name":"wget","desc":"Download files","installed":[{"version":"%s"}],"versions":{"stable":"1.1"},"outdated":%s}' "$version" "$outdated"
@@ -1203,8 +1252,14 @@ case "$1" in
     if [ "$2" != --formula ] || [ "$3" != -- ] || [ "$4" != wget ]; then exit 8; fi
     touch "$0.reinstalled"; echo 'Reinstalled wget';;
   uninstall) touch "$0.removed";;
+  cleanup)
+    if [ "$#" != 2 ] || [ "$2" != --prune=all ]; then exit 8; fi
+    if [ -f "$0.offline" ]; then echo 'Cache is not writable' >&2; exit 9; fi
+    rm -f "$0 cache/download"
+    touch "$0.cleaned"; echo 'Cache cleaned';;
   upgrade)
-    if [ "$4" != wget ]; then echo 'Unexpected update target' >&2; exit 8; fi
+    if [ "$#" = 1 ]; then touch "$0.bulk-upgraded";
+    elif [ "$4" != wget ]; then echo 'Unexpected update target' >&2; exit 8; fi
     if [ "$HOMEBREW_NO_ASK" != 1 ]; then echo 'Missing noninteractive confirmation' >&2; exit 8; fi
     touch "$0.upgraded"
     line=0
@@ -1213,9 +1268,12 @@ case "$1" in
 esac
 "##).unwrap();
         std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cache = directory.join("brew cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join("download"), vec![0; 2 * 1024 * 1024]).unwrap();
         cx.update(gpui_kit::init);
         let mut view = None;
-        let handle = cx.open_window(size(px(1000.), px(720.)), |window, cx| {
+        let handle = cx.open_window(size(px(900.), px(720.)), |window, cx| {
             let entity = cx.new(|cx| BrewView::new(Some(brew.clone()), window, cx));
             view = Some(entity.clone());
             Root::new(entity, window, cx)
@@ -1225,6 +1283,13 @@ esac
             !view.read(cx).busy
         })
         .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let label = window.find("clean-cache").label().unwrap().to_owned();
+            assert!(label.starts_with("Clean cache ("));
+            assert!(label.contains('M'), "{label}");
+        })
+        .unwrap();
         view.update(cx, |view, cx| {
             view.busy = true;
             cx.notify();
@@ -1233,6 +1298,10 @@ esac
             window.render_frame(cx);
             window.click("package-actions:--formula:wget", cx);
             assert!(window.try_find("popup-menu").is_none());
+            window.click("upgrade-all", cx);
+            window.click("clean-cache", cx);
+            assert!(!brew.with_extension("bulk-upgraded").exists());
+            assert!(!brew.with_extension("cleaned").exists());
         })
         .unwrap();
         view.update(cx, |view, cx| {
@@ -1506,7 +1575,64 @@ esac
         })
         .await;
         assert!(brew.with_extension("checked").exists());
+        for (button, marker, output) in [
+            ("upgrade-all", "bulk-upgraded", "Updated wget"),
+            ("clean-cache", "cleaned", "Cache cleaned"),
+        ] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                assert!(window.find(button).visible());
+                assert!(window.find(button).bounds().right() <= window.viewport_size().width);
+                window.click(button, cx);
+                assert!(view.read(cx).busy);
+                assert!(!view.read(cx).failed);
+            })
+            .unwrap();
+            cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+                !view.read(cx).busy
+            })
+            .await;
+            assert!(brew.with_extension(marker).exists());
+            cx.update(|cx| {
+                assert!(!view.read(cx).failed);
+                assert!(view.read(cx).output.contains(output));
+                assert_eq!(view.read(cx).installed.len(), 3);
+            });
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let label = window.find("clean-cache").label().unwrap().to_owned();
+            assert!(label.starts_with("Clean cache ("));
+            assert!(!label.contains('M'), "{label}");
+        })
+        .unwrap();
+        std::fs::write(brew.with_extension("cache-error"), "").unwrap();
         std::fs::write(brew.with_extension("offline"), "").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("clean-cache", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).busy
+        })
+        .await;
+        cx.update(|cx| {
+            assert!(view.read(cx).failed);
+            assert!(view.read(cx).output.contains("Cache is not writable"));
+            assert!(
+                view.read(cx)
+                    .cache_size
+                    .as_ref()
+                    .unwrap_err()
+                    .contains("Cache unavailable")
+            );
+            assert_eq!(view.read(cx).installed.len(), 3);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-cache").label(), Some("Clean cache"));
+        })
+        .unwrap();
+        std::fs::remove_file(brew.with_extension("cache-error")).unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("refresh-packages", cx);
         })
