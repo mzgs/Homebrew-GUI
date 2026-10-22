@@ -32,6 +32,39 @@ Run checks:
 cargo test --locked
 ```
 
+Publish a GitHub release (macOS, Python 3.11+, stable Rust, and Xcode command line tools):
+
+```sh
+python3 release.py
+```
+
+Commit all changes first. The script reads the GitHub token already embedded in the
+HTTPS `origin` URL in `.git/config`; it does not print or copy the token. The token
+needs repository contents write access. It fetches tags, increments the highest
+stable version from `Cargo.toml` and the tags by one patch (for example, `0.1.0` →
+`0.1.1`), updates `Cargo.toml`, `Cargo.lock`, and the app bundle versions, and runs
+the Rust tests. It installs both Rust targets and builds separate Apple Silicon
+(`arm64`) and Intel (`x86_64`) app ZIPs.
+
+The script commits the version bump, pushes the current branch and the new tag
+atomically to `origin`, then creates a release with generated notes. The release
+stays a draft until both ZIPs finish uploading. ZIPs are also saved under
+`target/releases/vVERSION/`. No GitHub CLI or Python packages are required.
+`./build.sh aarch64-apple-darwin` and `./build.sh x86_64-apple-darwin` can also build
+each architecture separately under `target/<target>/release/`.
+
+Build or test failures restore the original version files. After a release commit
+has been created, failures keep the commit, tag, and any draft for recovery;
+finish pushing or upload the saved ZIPs and publish the draft through GitHub
+before starting another release. Builds are ad-hoc signed, without Apple
+notarization, so downloaded apps may require approval in macOS Privacy & Security.
+
+Check the release script without publishing anything:
+
+```sh
+python3 -m unittest discover -s tests
+```
+
 Homebrew is detected in `PATH` and its standard Apple Silicon, Intel, and Linux locations. Nothing is installed or changed until you choose an action. Installs and upgrades can also change dependencies through normal Homebrew behavior.
 
 Keep the app open while a command runs. Output appears as Homebrew writes it. On macOS, commands that need administrator access show a password dialog. The password goes directly to sudo and is not saved or logged. An existing `SUDO_ASKPASS` helper is respected. Installers that need other interactive input may need to be run in Terminal. Tap management and services are outside this app’s scope.

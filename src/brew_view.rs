@@ -791,17 +791,7 @@ impl Render for BrewView {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                div()
-                                    .size_9()
-                                    .rounded_lg()
-                                    .bg(rgb(0xe9b461))
-                                    .text_color(rgb(0x3d2b12))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(Icon::new(IconName::Beer).size_5()),
-                            )
+                            .child(img("icons/app.png").size_9())
                             .child(
                                 div()
                                     .text_xl()
